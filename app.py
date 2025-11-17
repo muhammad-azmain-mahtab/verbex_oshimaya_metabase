@@ -115,8 +115,6 @@ async def verbex_webhook(
             'receivedAt': datetime.utcnow().isoformat()
         }
         
-        # Save and process
-        await save_webhook_to_database(webhook_data)
         processed_trace_ids.add(x_webhook_traceid)
         await process_webhook_event(webhook_data)
         
@@ -363,20 +361,6 @@ def parse_verbex_response(api_response: Dict[str, Any]) -> Dict[str, Any]:
             # Calculate total: sum of all quantities * 1990
             extracted_data['total'] = total_quantity * 1990
             logging.info(f"[parse] Total quantity sum: {total_quantity}, Calculated total: {total_quantity} * 1990 = {extracted_data['total']}")
-        else:
-            # Fallback: check if product_name_quantity exists (old behavior)
-            product_qty = extracted_data['pca_data'].get('product_name_quantity')
-            if product_qty:
-                try:
-                    quantity = float(product_qty)
-                    extracted_data['total'] = 1990 * quantity
-                    logging.info(f"[parse] Using product_name_quantity field: 1990 * {quantity} = {extracted_data['total']}")
-                except (ValueError, TypeError) as e:
-                    logging.error(f"[parse] Error converting product_quantity to float: {str(e)}")
-                    extracted_data['total'] = 0
-            else:
-                logging.info(f"[parse] No 'items' or 'product_name_quantity' field found, total set to 0")
-                extracted_data['total'] = 0
         
         return extracted_data
         
@@ -567,14 +551,6 @@ async def save_order_to_database(parsed_data: Dict[str, Any]) -> bool:
         if conn:
             conn.close()
             logging.info(f"[save_order] Database connection closed")
-
-
-async def save_webhook_to_database(webhook_data: Dict[str, Any]):
-    """
-    Save raw webhook data to database for auditing.
-    """
-    # Implement webhook audit table save if needed
-    logging.info('Webhook received and validated')
 
 
 @app.get('/health')
