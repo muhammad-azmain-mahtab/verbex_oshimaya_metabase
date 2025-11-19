@@ -6,6 +6,7 @@ import logging
 import httpx
 import os
 import psycopg2
+import asyncio
 
 
 app = FastAPI(
@@ -248,45 +249,69 @@ async def get_next_order_number(conn) -> str:
         cursor.close()
 
 
-async def fetch_call_data(call_id: str, agent_id: str) -> Optional[Dict[str, Any]]:
+async def fetch_call_data(call_id: str, agent_id: str, max_retries: int = 3) -> Optional[Dict[str, Any]]:
     """
-    Fetch post-call analysis data from Verbex API.
+    Fetch post-call analysis data from Verbex API with retry logic.
     
     Args:
         call_id: The call ID from the webhook payload
         agent_id: The AI agent ID from the webhook payload
+        max_retries: Maximum number of retry attempts (default: 3)
         
     Returns:
-        Call data from the API or None if request fails
+        Call data from the API or None if all retries fail
     """
     if not VERBEX_API_KEY:
         logging.error('VERBEX_API_KEY environment variable not set')
         return None
     
-    try:
-        async with httpx.AsyncClient() as client:
-            url = f"{VERBEX_API_URL}/v2/ai-agents/{agent_id}/postcall-analysis/results/{call_id}"
-            headers = {
-                "Authorization": f"Bearer {VERBEX_API_KEY}",
-                "accept": "*/*"
-            }
+    url = f"{VERBEX_API_URL}/v2/ai-agents/{agent_id}/postcall-analysis/results/{call_id}"
+    headers = {
+        "Authorization": f"Bearer {VERBEX_API_KEY}",
+        "accept": "*/*"
+    }
+    
+    for attempt in range(1, max_retries + 1):
+        try:
+            async with httpx.AsyncClient() as client:
+                logging.info(f"[fetch_call_data] Attempt {attempt}/{max_retries} for call {call_id}")
+                
+                response = await client.get(url, headers=headers, timeout=30.0)
+                response.raise_for_status()
+                
+                api_response = response.json()
+                logging.info(f"[fetch_call_data] Successfully fetched call data for {call_id} on attempt {attempt}")
+                return api_response
+                
+        except httpx.TimeoutException:
+            logging.warning(f"[fetch_call_data] Timeout on attempt {attempt}/{max_retries} for call {call_id}")
+            if attempt < max_retries:
+                await asyncio.sleep(2 ** attempt)  # Exponential backoff: 2, 4, 8 seconds
+            else:
+                logging.error(f"[fetch_call_data] All retry attempts exhausted - Timeout for call {call_id}")
+                return None
+                
+        except httpx.HTTPStatusError as e:
+            status_code = e.response.status_code
+            logging.warning(f"[fetch_call_data] HTTP {status_code} error on attempt {attempt}/{max_retries} for call {call_id}: {e.response.text}")
             
-            response = await client.get(url, headers=headers, timeout=30.0)
-            response.raise_for_status()
-            
-            api_response = response.json()
-            logging.info(f"Successfully fetched call data for {call_id}")
-            return api_response
-            
-    except httpx.TimeoutException:
-        logging.error(f"Timeout fetching call data for {call_id}")
-        return None
-    except httpx.HTTPStatusError as e:
-        logging.error(f"HTTP error fetching call data for {call_id}: {e.response.status_code} - {e.response.text}")
-        return None
-    except Exception as e:
-        logging.error(f"Error fetching call data for {call_id}: {str(e)}")
-        return None
+            # Only retry on 5xx errors (server errors), not 4xx (client errors)
+            if 500 <= status_code < 600 and attempt < max_retries:
+                await asyncio.sleep(2 ** attempt)  # Exponential backoff
+            else:
+                logging.error(f"[fetch_call_data] Failed with HTTP {status_code} for call {call_id}")
+                return None
+                
+        except Exception as e:
+            logging.warning(f"[fetch_call_data] Unexpected error on attempt {attempt}/{max_retries} for call {call_id}: {str(e)}")
+            if attempt < max_retries:
+                await asyncio.sleep(2 ** attempt)  # Exponential backoff
+            else:
+                logging.error(f"[fetch_call_data] All retry attempts exhausted - Unexpected error for call {call_id}")
+                return None
+    
+    return None
+
 
 
 def parse_verbex_response(api_response: Dict[str, Any]) -> Dict[str, Any]:
