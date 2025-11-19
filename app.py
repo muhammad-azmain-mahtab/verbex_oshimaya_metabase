@@ -157,7 +157,7 @@ async def process_webhook_event(webhook_data: Dict[str, Any]):
     if event_name == 'CallHandler.CallStarted':
         await handle_call_started(payload, call_id)
     elif event_name == 'CallHandler.CallEnded':
-        await handle_call_ended(payload, call_id)
+        await handle_call_ended(payload, call_id);
     elif event_name == 'callAnalysis.pcaCompleted':
         await handle_pca_completed(payload, call_id)
     else:
@@ -174,17 +174,17 @@ async def handle_call_ended(payload: Dict[str, Any], call_id: str):
     agent_id = payload.get('agent_id')
     logging.info(f"Call ended: {call_id} (agent: {agent_id})")
     # Fetch call data from Verbex API
-    api_response = await fetch_call_data(call_id, agent_id)
-    if api_response:
-        logging.info(f"Call data retrieved from API")
-        # Parse the response
-        parsed_data = parse_verbex_response(api_response)
-        # Save to database
-        saved = await save_order_to_database(parsed_data)
-        if saved:
-            logging.info(f"Order data from call {call_id} saved successfully")
-        else:
-            logging.warning(f"Failed to save order data from call {call_id}")
+    # api_response = await fetch_call_data(call_id, agent_id)
+    # if api_response:
+    #     logging.info(f"Call data retrieved from API")
+    #     # Parse the response
+    #     parsed_data = parse_verbex_response(api_response)
+    #     # Save to database
+    #     saved = await save_order_to_database(parsed_data)
+    #     if saved:
+    #         logging.info(f"Order data from call {call_id} saved successfully")
+    #     else:
+    #         logging.warning(f"Failed to save order data from call {call_id}")
 
 
 async def handle_pca_completed(payload: Dict[str, Any], call_id: str):
@@ -207,28 +207,30 @@ async def handle_pca_completed(payload: Dict[str, Any], call_id: str):
 
 async def get_next_order_number(conn) -> str:
     """
-    Get the next sequential order number.
+    Get the next sequential order number for today.
     Format: 108YYYYMMDD + 11-digit sequential counter (00000000001, 00000000002, etc.)
-    Counter increments globally regardless of date, starting from 1.
+    Counter resets daily, starting from 1 each day.
     Uses Japanese time (JST, UTC+9) for the date portion.
     
     Args:
         conn: Database connection
         
     Returns:
-        Next sequential order number
+        Next sequential order number for today
     """
     cursor = conn.cursor()
     today = datetime.now(JST).strftime('%Y%m%d')
     
     try:
-        # Get the highest sequence number from all orders (global counter)
+        # Get the highest sequence number for TODAY only (daily counter)
+        # Extract the date portion (characters 4-11) and match against today's date
         query = """
             SELECT MAX(CAST(SUBSTRING(order_number, 12) AS BIGINT)) 
             FROM public.orders 
-            WHERE order_number LIKE '108%'
+            WHERE order_number LIKE '108%%'
+            AND SUBSTRING(order_number, 4, 8) = %s
         """
-        cursor.execute(query)
+        cursor.execute(query, (today,))
         result = cursor.fetchone()
         last_seq = result[0] if result[0] is not None else 0
         
@@ -280,7 +282,7 @@ async def fetch_call_data(call_id: str, agent_id: str) -> Optional[Dict[str, Any
         logging.error(f"Timeout fetching call data for {call_id}")
         return None
     except httpx.HTTPStatusError as e:
-        logging.error(f"HTTP error fetching call data for {call_id}: {e.status_code} - {e.response.text}")
+        logging.error(f"HTTP error fetching call data for {call_id}: {e.response.status_code} - {e.response.text}")
         return None
     except Exception as e:
         logging.error(f"Error fetching call data for {call_id}: {str(e)}")
@@ -292,6 +294,7 @@ def parse_verbex_response(api_response: Dict[str, Any]) -> Dict[str, Any]:
     Parse Verbex post-call analysis API response and extract order data.
     Preserves original PCA field names in pca_data dictionary.
     Extracts product quantities from 'items' field and calculates total.
+    Sets shipping_fee based on item quantities if empty.
     
     Args:
         api_response: Response from Verbex API with structure {data: {items: [...]}}
@@ -361,6 +364,22 @@ def parse_verbex_response(api_response: Dict[str, Any]) -> Dict[str, Any]:
             # Calculate total: sum of all quantities * 1990
             extracted_data['total'] = total_quantity * 1990
             logging.info(f"[parse] Total quantity sum: {total_quantity}, Calculated total: {total_quantity} * 1990 = {extracted_data['total']}")
+            
+            # **NEW: Calculate shipping_fee based on quantities if it's empty**
+            shipping_fee = extracted_data['pca_data'].get('shipping_fee')
+            
+            # Check if shipping_fee is None, empty string, or whitespace-only
+            if not shipping_fee or (isinstance(shipping_fee, str) and not shipping_fee.strip()):
+                # If any item has quantity >= 1, set shipping_fee = 1
+                # If all items have quantity = 0, set shipping_fee = 0
+                if total_quantity >= 1:
+                    extracted_data['pca_data']['shipping_fee'] = '1'
+                    logging.info(f"[parse] Set shipping_fee = 1 (total_quantity: {total_quantity})")
+                else:
+                    extracted_data['pca_data']['shipping_fee'] = '0'
+                    logging.info(f"[parse] Set shipping_fee = 0 (total_quantity: {total_quantity})")
+            else:
+                logging.info(f"[parse] Using existing shipping_fee from PCA: {shipping_fee}")
         
         return extracted_data
         
