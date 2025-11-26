@@ -7,6 +7,8 @@ import httpx
 import os
 import psycopg2
 import asyncio
+import re
+import json
 
 
 app = FastAPI(
@@ -115,6 +117,9 @@ async def verbex_webhook(
             'body': body.dict(),
             'receivedAt': datetime.utcnow().isoformat()
         }
+
+        logging.info(f"↓↓↓ WEBHOOK RECEIVED ({x_webhook_event}) ↓↓↓")
+        logging.info(json.dumps(webhook_data, indent=2, ensure_ascii=False, default=str))
         
         processed_trace_ids.add(x_webhook_traceid)
         await process_webhook_event(webhook_data)
@@ -385,7 +390,53 @@ def parse_verbex_response(api_response: Dict[str, Any]) -> Dict[str, Any]:
                     logging.info(f"[parse] Extracted product: '{product_name}' with quantity: {quantity}")
                 else:
                     logging.warning(f"[parse] Could not extract quantity from product entry: {product_entry}")
-            
+                    
+            # Logic for phone number splitting
+            raw_phone = extracted_data['pca_data'].pop('orderer_phone_number', '')
+            phone_digits = re.sub(r'\D', '', str(raw_phone)) if raw_phone else ""
+            p1, p2, p3 = "N/A", "N/A", "N/A"
+            if len(phone_digits) == 11: 
+                # 11 digits: 3 - 4 - 4
+                p1 = phone_digits[:3]
+                p2 = phone_digits[3:7]
+                p3 = phone_digits[7:]
+            elif len(phone_digits) == 10:
+                # 10 digits: 2 - 4 - 4
+                p1 = phone_digits[:2]
+                p2 = phone_digits[2:6]
+                p3 = phone_digits[6:]
+            elif len(phone_digits) > 0:
+                # Less than 10 (or > 11 edge case): Fill from left
+                # Attempting standard 3-4-4 fill pattern for consistency
+                p1 = phone_digits[:3]
+                p2 = phone_digits[3:7] if len(phone_digits) > 3 else "N/A"
+                p3 = phone_digits[7:] if len(phone_digits) > 7 else "N/A"
+
+            extracted_data['pca_data']['orderer_phone_number_1'] = p1
+            extracted_data['pca_data']['orderer_phone_number_2'] = p2
+            extracted_data['pca_data']['orderer_phone_number_3'] = p3
+            logging.info(f"[parse] Split Phone: {p1}-{p2}-{p3} (Origin: {raw_phone})")
+
+            # Logic for postal_code splitting
+            raw_postal = extracted_data['pca_data'].pop('postal_code', '')
+            postal_digits = re.sub(r'\D', '', str(raw_postal)) if raw_postal else ""
+
+            post1, post2 = "N/A", "N/A"
+
+            if len(postal_digits) >= 7:
+                # 7 digits: 3 - 4
+                post1 = postal_digits[:3]
+                post2 = postal_digits[3:7] # Cut off at 7 if longer
+            elif len(postal_digits) > 0:
+                # Less than 7: Fill from left
+                post1 = postal_digits[:3]
+                post2 = postal_digits[3:] if len(postal_digits) > 3 else "N/A"
+
+            # Assign to pca_data
+            extracted_data['pca_data']['postal_code_1'] = post1
+            extracted_data['pca_data']['postal_code_2'] = post2
+            logging.info(f"[parse] Split Postal: {post1}-{post2} (Origin: {raw_postal})")
+                
             # Calculate total: sum of all quantities * 1990
             extracted_data['total'] = total_quantity * 1990
             logging.info(f"[parse] Total quantity sum: {total_quantity}, Calculated total: {total_quantity} * 1990 = {extracted_data['total']}")
